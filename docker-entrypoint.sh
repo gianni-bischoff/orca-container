@@ -46,7 +46,12 @@ netbird_start() {
 
   # Persistent state (WireGuard keys, config, peer identity) lives in the
   # netbird_state volume -> the peer keeps its NetBird IP/FQDN across restarts.
-  netbird service run &
+  # Persistent state (WireGuard keys, config, peer identity) lives in the
+  # netbird_state volume -> the peer keeps its NetBird IP/FQDN across restarts.
+  # HOME is redirected so the root daemon never creates root-owned dirs
+  # (e.g. ~/.config) inside the orca user's home - that broke the Orca
+  # Electron "userData" preflight (could not write ~/.config).
+  HOME=/var/lib/netbird netbird service run &
   NETBIRD_PID=$!
 
   # Wait until the daemon answers on its unix socket (same idea as the
@@ -61,15 +66,16 @@ netbird_start() {
 
   if [ -n "${NETBIRD_SETUP_KEY:-}" ]; then
     # Pass the setup key via file instead of argv so it never shows up in
-    # `ps` output inside the container.
+    # `ps` output inside the container. The file is removed only after the
+    # registration attempts are done.
     local key_file=/run/netbird-setup-key
     (umask 077 && printf '%s' "$NETBIRD_SETUP_KEY" > "$key_file")
     local up_args=(up --setup-key-file "$key_file")
-    rm -f "$key_file"
 
+    # Register against YOUR management server, not the default api.netbird.io
+    [ -n "${NETBIRD_MANAGEMENT_URL:-}" ] && up_args+=(--management-url "${NETBIRD_MANAGEMENT_URL}")
     [ -n "${NETBIRD_PEER_NAME:-}" ] && up_args+=(-n "${NETBIRD_PEER_NAME}")
     [ "${NETBIRD_DISABLE_DNS:-0}" = "1" ] && up_args+=(--disable-dns)
-    [ "${NB_SKIP_NFTABLES_CHECK:-0}" = "1" ] && :
     [ -n "${NETBIRD_EXTRA_UP_FLAGS:-}" ] && up_args+=(${NETBIRD_EXTRA_UP_FLAGS})
 
     local attempt
@@ -77,11 +83,13 @@ netbird_start() {
       # shellcheck disable=SC2086
       if netbird "${up_args[@]}"; then
         log "netbird: registered/connected ($(nb_status_connected && echo ok || echo 'see netbird status'))"
+        rm -f "$key_file"
         return 0
       fi
       warn "netbird up failed (attempt ${attempt}/3)"
       sleep 5
     done
+    rm -f "$key_file"
     return 1
   elif nb_status_connected; then
     # No key env in this run, but the daemon auto-connected with the config
@@ -95,6 +103,9 @@ netbird_start() {
 }
 
 if [ "${NETBIRD_ENABLED:-0}" = "1" ]; then
+  # Heal any root-owned dirs a previous bug left inside the orca home
+  # (Electron refuses to start if it cannot write its userData = ~/.config).
+  chown -R orca:orca /home/orca/.config /home/orca/.cache /home/orca/.local 2>/dev/null || true
   log "netbird: daemon enabled (management: ${NETBIRD_MANAGEMENT_URL:-https://netbird.wildblood.dev})"
   netbird_start || warn "netbird not connected - continuing with Orca only"
 else
@@ -104,7 +115,11 @@ fi
 ###############################################################################
 # Orca server
 ###############################################################################
-log "starting orca: /opt/orca/app/AppRun ${ORCA_ARGS[*]}${*:+ $*}"
+# RPM installs the Electron binary at /opt/Orca/orca-ide and links the
+# launcher to /usr/bin/orca-ide; headless start is documented as
+# `orca-ide serve ...`.
+ORCA_BIN="${ORCA_BIN:-/usr/bin/orca-ide}"
+log "starting orca: ${ORCA_BIN} ${ORCA_ARGS[*]}${*:+ $*}"
 runuser -u orca -- \
   env HOME=/home/orca \
       PATH="$PATH" \
@@ -112,7 +127,7 @@ runuser -u orca -- \
       LANG=C.UTF-8 LC_ALL=C.UTF-8 \
       LIBGL_ALWAYS_SOFTWARE=1 \
       NPM_CONFIG_UPDATE_NOTIFIER=false \
-      /opt/orca/app/AppRun "${ORCA_ARGS[@]}" "$@" &
+      "${ORCA_BIN}" "${ORCA_ARGS[@]}" "$@" &
 ORCA_PID=$!
 
 wait "$ORCA_PID"

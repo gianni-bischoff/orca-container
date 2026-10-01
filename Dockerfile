@@ -3,12 +3,11 @@
 # Orca headless server + Pi coding agent + NetBird agent peer
 #
 # Contents:
-#   - Orca (stablyai/orca) Linux AppImage, extracted to /opt/orca/app
-#     (extracted on purpose: Docker containers usually have no /dev/fuse,
-#      and the Orca docs recommend --appimage-extract for containers)
+#   - Orca (stablyai/orca) from the official RPM into /opt/Orca
+#     (the RPM postinstall links /usr/bin/orca-ide; deps incl. Xvfb are
+#      declared by the RPM and resolved by microdnf)
 #   - Node.js LTS (>= 22.19, what Pi requires) preinstalled
 #   - Pi coding agent (@earendil-works/pi-coding-agent) preinstalled
-#   - Xvfb + the Electron/Chromium runtime libraries Orca needs headless
 #   - NetBird client (optional agent peer; enable via NETBIRD_ENABLED=1)
 #
 # Persistence is entirely via volumes at runtime (see docker-compose.yml):
@@ -18,12 +17,16 @@
 #
 # Build:  docker build -t orca-server .
 # Run:    docker compose up -d
+#
+# Note: ORCA_VERSION uses the Orca release version WITHOUT the "v" prefix
+# (e.g. ORCA_VERSION=1.4.218 -> asset orca-ide-1.4.218.x86_64.rpm).
 ###############################################################################
 
 ########
 # Args
 ########
-# "latest", or pin a release tag, e.g. ORCA_VERSION=v1.4.218
+# "latest" resolves the newest stablyai/orca release via the GitHub API at
+# build time; or pin explicitly, e.g. ORCA_VERSION=1.4.218
 ARG ORCA_VERSION=latest
 # Pi requires Node >= 22.19.0
 ARG NODE_VERSION=22.23.3
@@ -32,36 +35,63 @@ ARG NETBIRD_VERSION=0.79.0
 
 
 ###############################################################################
-# Base: Rocky 9 minimal + runtime libs for the Orca/Electron AppImage
+# Stage orca: Rocky minimal + RPM runtime deps + Orca IDE
 ###############################################################################
-FROM rockylinux:9-minimal AS base
-
-# Xvfb: Orca starts its own virtual display when no DISPLAY is set.
-# The rest of the list covers everything Electron/Chromium dlopen's at startup
-# (same set as the official headless docs, using EL9 package names).
-# If you ever see GL/GPU-related crashes, also add:
-#   mesa-dri-drivers mesa-libGL mesa-libEGL
-RUN set -eux; \
-    microdnf -y install epel-release || true; \
-    microdnf -y install xvfb 2>/dev/null || microdnf -y install xorg-x11-server-Xvfb; \
-    microdnf -y install \
-      curl git git-lfs tar xz gzip ca-certificates \
-      which findutils hostname procps-ng shadow-utils util-linux \
-      fuse fuse-libs \
-      gtk3 nss atk at-spi2-core cups-libs libdrm libxkbcommon \
-      libXcomposite libXdamage libXfixes libXrandr libXcursor \
-      libXScrnSaver libXtst libxshmfence alsa-lib mesa-libgbm \
-      pango cairo fontconfig dejavu-sans-fonts; \
-    microdnf clean all; \
-    rm -rf /var/cache/dnf /var/cache/yum
-
-
-###############################################################################
-# Node.js: install from upstream tarball so NODE_VERSION is a plain build arg
-###############################################################################
-FROM base AS node
+FROM rockylinux:9-minimal AS orca
 
 ARG TARGETARCH
+ARG ORCA_VERSION
+
+# Runtime libraries: everything the Orca RPM declares as dependencies
+# (microdnf resolves them), plus tooling the rest of the image needs.
+# xdotool/xclip live in EPEL -> enable it first.
+RUN set -eux; \
+    microdnf -y install epel-release || microdnf -y install \
+      https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm; \
+    microdnf -y install \
+      gtk3 nss at-spi2-core libXScrnSaver libnotify \
+      python3 python3-gobject xdotool xclip xdg-utils \
+      xorg-x11-server-Xvfb \
+      git git-lfs curl ca-certificates tar gzip xz which \
+      hostname procps-ng shadow-utils util-linux findutils \
+      iptables-nft iproute; \
+    microdnf clean all; rm -rf /var/cache/dnf /var/cache/yum
+
+# Resolve the release version, download the matching RPM, install it.
+# The postinstall scriptlet creates /usr/bin/orca-ide; --nosignature because
+# the RPM ships unsigned and microdnf has no --nogpgcheck.
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) RPM_ARCH=x86_64 ;; \
+      arm64) RPM_ARCH=aarch64 ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    if [ "${ORCA_VERSION}" = "latest" ]; then \
+      ORCA_VER="$(curl -fsSL --retry 3 \
+        https://api.github.com/repos/stablyai/orca/releases/latest \
+        | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' \
+        | sed 's/^v//')"; \
+      test -n "${ORCA_VER}"; \
+    else \
+      ORCA_VER="${ORCA_VERSION#v}"; \
+    fi; \
+    echo "Installing Orca version ${ORCA_VER}"; \
+    curl -fL --retry 3 \
+      "https://github.com/stablyai/orca/releases/download/v${ORCA_VER}/orca-ide-${ORCA_VER}.${RPM_ARCH}.rpm" \
+      -o /tmp/orca-ide.rpm; \
+    ls -lh /tmp/orca-ide.rpm; \
+    rpm -ivh --nosignature /tmp/orca-ide.rpm; \
+    rm -f /tmp/orca-ide.rpm; \
+    test -x /opt/Orca/resources/bin/orca-ide; \
+    test -x /usr/bin/orca-ide; \
+    /usr/bin/orca-ide --version | head -n1
+
+
+###############################################################################
+# Stage node: Node.js LTS tarball (NODE_VERSION is a plain build arg)
+###############################################################################
+FROM orca AS node
+
 ARG NODE_VERSION
 
 RUN set -eux; \
@@ -70,13 +100,14 @@ RUN set -eux; \
       arm64) NODE_ARCH=arm64 ;; \
       *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
+    curl -fsSL --retry 3 \
+      "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
       | tar -xJ --strip-components=1 -C /usr/local; \
     node --version && npm --version
 
 
 ###############################################################################
-# Pi: official install command (globally, on PATH for the orca user too)
+# Stage pi: official npm install command (global, on PATH for orca user too)
 ###############################################################################
 FROM node AS pi
 
@@ -92,7 +123,7 @@ ENV NPM_CONFIG_UPDATE_NOTIFIER=false
 
 
 ###############################################################################
-# NetBird: client binary + the runtime deps the official image installs
+# Stage netbird: client binary + its runtime deps
 ###############################################################################
 FROM pi AS netbird
 
@@ -100,7 +131,6 @@ ARG TARGETARCH
 ARG NETBIRD_VERSION
 
 RUN set -eux; \
-    microdnf -y install iproute iptables-nft; \
     case "${TARGETARCH}" in \
       amd64) NB_ARCH=amd64 ;; \
       arm64) NB_ARCH=arm64 ;; \
@@ -122,60 +152,31 @@ ENV NB_LOG_FILE="console,/var/log/netbird/client.log" \
 
 
 ###############################################################################
-# Runtime: Orca AppImage (extracted), non-root user, persistent-layout dirs
+# Stage runtime: non-root user, entrypoint, persistence layout
 ###############################################################################
 FROM netbird AS runtime
 
 ARG TARGETARCH
-ARG ORCA_VERSION
 
-# Download (latest or pinned) and extract once at build time. Running the
-# extracted AppRun directly needs no FUSE and keeps `docker logs` clean.
 RUN set -eux; \
-    mkdir -p /opt/orca /var/log/netbird; \
-    case "${TARGETARCH}" in \
-      amd64) ORCA_ASSET=orca-linux.AppImage ;; \
-      arm64) ORCA_ASSET=orca-linux-arm64.AppImage ;; \
-      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
-    if [ "$ORCA_VERSION" = "latest" ]; then \
-      ORCA_URL="https://github.com/stablyai/orca/releases/latest/download/${ORCA_ASSET}"; \
-    else \
-      ORCA_URL="https://github.com/stablyai/orca/releases/download/${ORCA_VERSION}/${ORCA_ASSET}"; \
-    fi; \
-    curl -fL --retry 3 "$ORCA_URL" -o /tmp/orca-linux.AppImage; \
-    chmod +x /tmp/orca-linux.AppImage; \
-    ls -lh /tmp/orca-linux.AppImage; \
-    cd /opt/orca; \
-    /tmp/orca-linux.AppImage --appimage-extract >/dev/null; \
-    rm /tmp/orca-linux.AppImage; \
-    chmod -R a+rX /opt/orca/squashfs-root; \
-    mv /opt/orca/squashfs-root /opt/orca/app; \
-    test -x /opt/orca/app/AppRun; \
-    test -x /opt/orca/app/resources/bin/orca-ide; \
-    ln -sfn /opt/orca/app/resources/bin/orca-ide /usr/local/bin/orca-ide; \
-    /opt/orca/app/resources/bin/orca-ide --version | head -n1
-
-# Non-root service user. Chromium's sandbox stays enabled; never run as root.
-# /data/workspaces is the default workdir: mount your persistent workspace
-# volume here so clones/worktrees survive restarts.
-RUN groupadd --gid 1000 orca \
-    && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash \
-         --home-dir /home/orca orca \
-    && mkdir -p /data/workspaces \
-    && chown -R orca:orca /data/workspaces
+    mkdir -p /data/workspaces /var/log/netbird; \
+    groupadd --gid 1000 orca; \
+    useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash \
+         --home-dir /home/orca orca; \
+    chown -R orca:orca /data/workspaces; \
+    # Pre-create XDG dirs as orca so nothing ever creates them root-owned
+    install -d -o orca -g orca -m 700 \
+      /home/orca/.config /home/orca/.cache /home/orca/.local
 
 # LIBGL_ALWAYS_SOFTWARE=1: no GPU in a container, force software rendering.
-# DISPLAY is intentionally NOT set - Orca starts its own Xvfb on :99.
-# PATH keeps /usr/local/bin first so the root entrypoint finds netbird and
-# the orca user still gets node/npm/pi/orca-ide.
+# DISPLAY is NOT set - Orca starts its own Xvfb on :99 when none exists.
 ENV HOME=/home/orca \
     TERM=xterm-256color \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     NPM_CONFIG_UPDATE_NOTIFIER=false \
     NPM_CONFIG_PREFIX=/usr/local \
-    PATH=/usr/local/bin:/opt/orca/app/resources/bin:$PATH \
+    PATH=/usr/local/bin:/usr/local/sbin:/usr/bin:$PATH \
     LIBGL_ALWAYS_SOFTWARE=1 \
     ORCA_PORT=6768
 

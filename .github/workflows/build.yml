@@ -34,13 +34,15 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${REF_TYPE}" = "tag" ]; then
-            # Repo tag should name the matching Orca release
-            # (repo tag v1.4.218 -> Orca release v1.4.218).
+            # Repo tag v1.2.3 -> Orca RPM version 1.2.3 (Orca release tags are vX.Y.Z,
+            # the Dockerfile strips the v). Falls back to latest when the repo tag has
+            # no matching Orca release.
+            orca="${REF_NAME#v}"
             if curl -fsSI -o /dev/null \
-              "https://github.com/stablyai/orca/releases/download/${REF_NAME}/orca-linux.AppImage"; then
-              echo "orca_version=${REF_NAME}" >> "$GITHUB_OUTPUT"
+              "https://github.com/stablyai/orca/releases/download/v${orca}/orca-ide-${orca}.x86_64.rpm"; then
+              echo "orca_version=${orca}" >> "$GITHUB_OUTPUT"
             else
-              echo "::warning::No Orca release ${REF_NAME}; building latest"
+              echo "::warning::No Orca release v${orca}; building latest"
               echo "orca_version=latest" >> "$GITHUB_OUTPUT"
             fi
           else
