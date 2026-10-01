@@ -1,5 +1,6 @@
 # Secrets & local overrides - never commit
 .env
+data/
 *.local
 
 # Orca/agent state that should never leave the machine

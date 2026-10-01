@@ -1,0 +1,54 @@
+# microsandbox (msb) sandbox configuration for the Orca headless server.
+#
+# The sandbox runs the same OCI image as the Docker Compose stack
+# (ghcr.io/gianni-bischoff/orca-container) as a microVM. Persistence via
+# gitignored bind mounts under ./data/ (created on first start):
+#   ./data/orca-home       -> /home/orca       Orca state + agent CLI creds
+#   ./data/workspaces      -> /data/workspaces git repos and worktrees
+#   ./data/netbird-state   -> /var/lib/netbird WireGuard keys = peer identity
+#
+# env values support ${NAME} substitution: the variable must exist in your
+# shell (or wrapper) when the config is loaded. Use ./msb.sh, which sources
+# .env for you.
+#
+# Usage:
+#   ./msb.sh create           # first start (registers the NetBird peer)
+#   ./msb.sh logs             # pairing URL + netbird status
+#   ./msb.sh exec netbird status
+
+image: ghcr.io/gianni-bischoff/orca-container:latest
+pull_policy: missing
+cpus: 4
+memory: 8G
+
+workdir: /data/workspaces
+hostname: orca-server
+user: root                # entrypoint starts netbird (root) then drops to orca
+entrypoint: ["/usr/local/bin/docker-entrypoint.sh"]
+
+env:
+  ORCA_PORT: "6768"
+  ORCA_PAIRING_ADDRESS: "${ORCA_PAIRING_ADDRESS}"
+  ORCA_MOBILE_PAIRING: "0"
+  NETBIRD_ENABLED: "1"
+  # ${NAME} records the host-side source; the value itself never lands in
+  # the durable sandbox config.
+  NETBIRD_SETUP_KEY: "${NETBIRD_SETUP_KEY}"
+  NETBIRD_MANAGEMENT_URL: "${NETBIRD_MANAGEMENT_URL}"
+  NETBIRD_PEER_NAME: "orca-server"
+  NETBIRD_DISABLE_DNS: "1"
+
+mounts:
+  # gitignored persistence (repo-relative bind mounts).
+  # uid/gid map guest-visible ownership: msb maps host uid 1000 -> guest
+  # root by default; with uid=1000,gid=1000 the files appear as guest uid
+  # 1000 (orca), which Electron's userData preflight requires.
+  - "./data/orca-home:/home/orca:uid=1000,gid=1000"
+  - "./data/workspaces:/data/workspaces:uid=1000,gid=1000"
+  # netbird state must be writable by the root daemon (guest root = host 1000);
+  # the copied files are uid-0/0600 on the host -> relaxed stat virtualization
+  - "./data/netbird-state:/var/lib/netbird:uid=0,gid=0,stat-virt=relaxed"
+
+network:
+  policy: public
+  ports: ["6768:6768"]
