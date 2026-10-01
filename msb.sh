@@ -3,11 +3,12 @@
 # ${NAME} substitution and msb does not read .env files itself.
 #
 # Usage:
-#   ./msb.sh create            # create + boot the sandbox (first start)
-#   ./msb.sh attach            # run the default workload (entrypoint) via msb run
-#   ./msb.sh logs              # sandbox logs (pairing URL, orca, netbird)
-#   ./msb.sh netbird           # netbird status inside the sandbox
-#   ./msb.sh stop | start | remove
+#   ./msb.sh up        # start Orca+NetBird in the background (detached)
+#   ./msb.sh logs      # pairing URL + readiness
+#   ./msb.sh netbird   # netbird status inside the sandbox
+#   ./msb.sh stop      # stop the VM (data in ./data survives)
+#   ./msb.sh start     # boot + run detached again (same as up)
+#   ./msb.sh remove    # delete the sandbox definition (data in ./data kept)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -20,38 +21,36 @@ set +a
 export PATH="$HOME/.local/bin:$PATH"
 
 NAME=orca-server
-IMAGE="${MSB_IMAGE:-ghcr.io/gianni-bischoff/orca-container:latest}"
 
 case "${1:-help}" in
-  create)
-    msb create --conf sandbox.yaml --name "$NAME"
-    echo "sandbox created; start the workload with: ./msb.sh attach"
-    ;;
-  attach)
-    # msb run attaches to the sandbox and runs the configured workload
-    # (our entrypoint). Ctrl+C detaches the CLI; run with SIGKILL safety.
-    msb run --conf sandbox.yaml --name "$NAME"
+  up|start|run)
+    # --detach runs the configured entrypoint in the background. On an
+    # existing sandbox the creation flags are ignored and the stored config
+    # is reused; the workload always starts (unlike plain `msb start`,
+    # which boots an idle VM without the entrypoint).
+    msb run --conf sandbox.yaml --name "$NAME" --detach
+    echo
+    echo "started: ./msb.sh logs   (pairing URL, readiness)"
+    echo "status:  ./msb.sh netbird"
     ;;
   logs)      msb logs "$NAME" ;;
+  log)       msb logs "$NAME" 2>/dev/null | grep -E "\[entrypoint\]|Orca server ready|Bound|Advertised|Pairing URL|ERRO|FATL" | tail -12 ;;
   netbird)   msb exec "$NAME" -- netbird status ;;
-  orca-log)  msb logs "$NAME" 2>/dev/null | grep -E "entrypoint|Orca|Bound|Pairing|netbird" ;;
-  stop)      msb stop "$NAME" ;;
-  start)     msb start "$NAME" ;;
   status)    msb status "$NAME" ;;
-  remove)    msb remove "$NAME" --force ;;
   shell)     msb exec "$NAME" -- bash -l ;;
+  stop)      msb stop "$NAME" ;;
+  remove)    msb remove "$NAME" --force ;;
   *)
     cat <<EOF
 Usage: ./msb.sh <command>
-  create    create sandbox (persistent mounts under ./data)
-  attach    boot + run entrypoint (foreground)
-  start     start previously created sandbox
-  stop      stop sandbox
-  logs      show logs
-  netbird   netbird status inside the sandbox
+  up        start Orca + NetBird in the background (detached)  <-- main command
+  logs      full sandbox logs
+  log       filtered logs (pairing URL, readiness, errors)
+  netbird   netbird status inside the microVM
   status    sandbox status
-  shell     shell into the sandbox
-  remove    remove sandbox (data in ./data is kept)
+  shell     shell into the microVM
+  stop      stop the microVM (data in ./data is kept)
+  remove    remove the sandbox (data in ./data is kept)
 EOF
     ;;
 esac
