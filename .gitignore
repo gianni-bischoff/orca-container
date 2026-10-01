@@ -1,0 +1,12 @@
+# Secrets & local overrides - never commit
+.env
+*.local
+
+# Orca/agent state that should never leave the machine
+orca-data.json*
+*.key
+*.pem
+
+# OS / editor noise
+.DS_Store
+*.swp

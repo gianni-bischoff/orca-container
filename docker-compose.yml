@@ -1,0 +1,85 @@
+# Orca headless server (orca serve) + Pi coding agent + NetBird agent peer.
+#
+# Persistence:
+#   - orca_home       : Orca state (projects, worktree metadata, terminal
+#                       history, orchestration state, paired-device keys) and
+#                       agent CLI credentials (~/.claude, ~/.codex, ~/.pi ...)
+#   - orca_workspaces : git repositories and worktrees (container workdir)
+#   - netbird_state   : NetBird WireGuard keys/config -> the peer keeps its
+#                       NetBird IP and FQDN across container restarts
+#
+# NetBird (optional; enabled in .env with NETBIRD_ENABLED=1):
+#   Registers this container as its own peer ("agent peer") on your
+#   self-hosted management at https://netbird.wildblood.dev using a setup
+#   key. The container needs NET_ADMIN + SYS_ADMIN + SYS_RESOURCE caps and
+#   /dev/net/tun. Setup key + name come from .env (keep out of git).
+#
+#   After first start, check the peer:
+#     docker exec -it orca-server netbird status
+#
+# Pairing (Orca clients):
+#   `docker compose logs orca` prints the Pairing URL -> paste it into the
+#   Orca client (Settings -> Remote Orca Servers -> Add Server) or mobile app.
+#
+#   Set ORCA_PAIRING_ADDRESS in .env to the address clients will dial. To let
+#   other NetBird peers reach Orca over the overlay, set it to this peer's
+#   NetBird IP (shown in `netbird status`), e.g.:
+#     ORCA_PAIRING_ADDRESS=100.110.x.y
+#
+# Remote Orca Servers are beta: keep clients on a private network path.
+
+services:
+  orca:
+    build:
+      context: .
+      args:
+        # Pin a release for reproducible builds, e.g. ORCA_VERSION=v1.4.218
+        ORCA_VERSION: ${ORCA_VERSION:-latest}
+        NETBIRD_VERSION: ${NETBIRD_VERSION:-0.79.0}
+    image: orca-server:latest
+    container_name: orca-server
+    # Mandatory: tini as PID 1 reaps exited agent/PTY subprocesses.
+    init: true
+    restart: unless-stopped
+    hostname: ${NETBIRD_PEER_NAME:-orca-server}
+    ports:
+      # Orca WebSocket listener (host port override via ORCA_PORT in .env)
+      - "${ORCA_PORT:-6768}:6768"
+    environment:
+      ORCA_PORT: ${ORCA_PORT:-6768}
+      # Address advertised to Orca clients; must be reachable from outside
+      # the container (never 127.0.0.1). Leave empty to let Orca pick one.
+      ORCA_PAIRING_ADDRESS: ${ORCA_PAIRING_ADDRESS:-}
+      ORCA_MOBILE_PAIRING: ${ORCA_MOBILE_PAIRING:-0}
+      # --- NetBird agent peer -------------------------------------------
+      NETBIRD_ENABLED: ${NETBIRD_ENABLED:-0}
+      NETBIRD_SETUP_KEY: ${NETBIRD_SETUP_KEY:-}
+      NETBIRD_MANAGEMENT_URL: ${NETBIRD_MANAGEMENT_URL:-https://netbird.wildblood.dev}
+      # Peer identity in the dashboard; defaults to the container hostname
+      NETBIRD_PEER_NAME: ${NETBIRD_PEER_NAME:-}
+      # Avoid NetBird rewriting /etc/resolv.conf inside the container
+      NETBIRD_DISABLE_DNS: ${NETBIRD_DISABLE_DNS:-1}
+      NETBIRD_EXTRA_UP_FLAGS: ${NETBIRD_EXTRA_UP_FLAGS:-}
+      # Pass agent/provider credentials straight through if the CLIs need
+      # them as env (ANTHROPIC_API_KEY, OPENAI_API_KEY, GITHUB_TOKEN, ...)
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+      - SYS_RESOURCE
+    devices:
+      # WireGuard tunnel device (used in kernel/netstack mode)
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      # IPv6 overlay addressing (per netbird docs for non-host networking)
+      - net.ipv6.conf.all.disable_ipv6=0
+      - net.ipv6.conf.all.forwarding=1
+    stop_grace_period: 30s
+    volumes:
+      - orca_home:/home/orca
+      - orca_workspaces:/data/workspaces
+      - netbird_state:/var/lib/netbird
+
+volumes:
+  orca_home:
+  orca_workspaces:
+  netbird_state:
