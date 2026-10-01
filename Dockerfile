@@ -126,18 +126,26 @@ ENV NB_LOG_FILE="console,/var/log/netbird/client.log" \
 ###############################################################################
 FROM netbird AS runtime
 
+ARG TARGETARCH
 ARG ORCA_VERSION
 
 # Download (latest or pinned) and extract once at build time. Running the
 # extracted AppRun directly needs no FUSE and keeps `docker logs` clean.
 RUN set -eux; \
     mkdir -p /opt/orca /var/log/netbird; \
+    case "${TARGETARCH}" in \
+      amd64) ORCA_ASSET=orca-linux.AppImage ;; \
+      arm64) ORCA_ASSET=orca-linux-arm64.AppImage ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
     if [ "$ORCA_VERSION" = "latest" ]; then \
-      ORCA_URL="https://github.com/stablyai/orca/releases/latest/download/orca-linux.AppImage"; \
+      ORCA_URL="https://github.com/stablyai/orca/releases/latest/download/${ORCA_ASSET}"; \
     else \
-      ORCA_URL="https://github.com/stablyai/orca/releases/download/${ORCA_VERSION}/orca-linux.AppImage"; \
+      ORCA_URL="https://github.com/stablyai/orca/releases/download/${ORCA_VERSION}/${ORCA_ASSET}"; \
     fi; \
-    curl -fL "$ORCA_URL" -o /tmp/orca-linux.AppImage; \
+    curl -fL --retry 3 "$ORCA_URL" -o /tmp/orca-linux.AppImage; \
+    chmod +x /tmp/orca-linux.AppImage; \
+    ls -lh /tmp/orca-linux.AppImage; \
     cd /opt/orca; \
     /tmp/orca-linux.AppImage --appimage-extract >/dev/null; \
     rm /tmp/orca-linux.AppImage; \
