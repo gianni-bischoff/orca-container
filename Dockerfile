@@ -108,7 +108,11 @@ RUN set -eux; \
     esac; \
     curl -fL --retry 3 \
       "https://github.com/netbirdio/netbird/releases/download/v${NETBIRD_VERSION}/netbird_${NETBIRD_VERSION}_linux_${NB_ARCH}.tar.gz" \
-      | tar -xz -C /usr/local/bin --wildcards '*/netbird'; \
+      -o /tmp/netbird.tgz; \
+    mkdir -p /tmp/netbird-extract; \
+    tar -xzf /tmp/netbird.tgz -C /tmp/netbird-extract; \
+    mv /tmp/netbird-extract/netbird /usr/local/bin/netbird; \
+    rm -rf /tmp/netbird.tgz /tmp/netbird-extract; \
     chmod 0755 /usr/local/bin/netbird; \
     netbird version
 
